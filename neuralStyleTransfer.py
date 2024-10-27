@@ -66,7 +66,7 @@ optimizer = torch.optim.Adam([target_img], lr=0.003)
 content_weight = 100
 style_weight = 1e8
 
-for i in range(100):
+for i in range(2000):
     optimizer.zero_grad()
     target_features=get_features(target_img, vgg)
     c_loss=content_loss(content_features['conv4_2'], target_features["conv4_2"])
