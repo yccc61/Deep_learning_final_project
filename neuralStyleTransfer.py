@@ -66,7 +66,34 @@ optimizer = torch.optim.Adam([target_img], lr=0.003)
 content_weight = 100
 style_weight = 1e8
 
-for i in range(2000):
+import torch.nn as nn
+import metric
+
+# Define a function to load the Inception model for feature extraction
+class InceptionV3(nn.Module):
+    def __init__(self):
+        super(InceptionV3, self).__init__()
+        inception = models.inception_v3(pretrained=True, transform_input=False)
+        self.features = nn.Sequential(*list(inception.children())[:-1])  # Remove the last FC layer
+        self.features.eval()
+
+    def forward(self, x):
+        x = nn.functional.interpolate(x, size=(299, 299), mode='bilinear')
+        x = self.features(x)
+        return x.view(x.size(0), -1)
+
+# Load the InceptionV3 model
+inception_model = InceptionV3().eval()
+
+import lpips
+# Initialize the LPIPS model (default: use VGG as the backbone)
+lpips_model = lpips.LPIPS(net='vgg').eval()
+
+sifid_scores = []
+lpips_scores = []
+
+for epoch in range(2000):
+    print(f"Epoch {epoch}")
     optimizer.zero_grad()
     target_features=get_features(target_img, vgg)
     c_loss=content_loss(content_features['conv4_2'], target_features["conv4_2"])
@@ -78,7 +105,13 @@ for i in range(2000):
     total_loss.backward(retain_graph=True)
     optimizer.step()
 
-    print(i)
+    # Calculate SIFID and LPIPS scores
+    sifid = metric.calculate_sifid(style_img, target_img, inception_model)
+    sifid_scores.append(sifid)
+    lpips = metric.calculate_lpips(style_img, target_img, lpips_model)
+    lpips_scores.append(lpips)
+
+    print(f"Epoch {epoch}, Total Loss: {total_loss.item()}, SIFID: {sifid}")
 
 def im_convert(tensor):
     image = tensor.to("cpu").clone().detach().numpy()
