@@ -1,131 +1,117 @@
 import torch
-from torchvision import models
+import torch.nn as nn
+import torch.optim as optim
+from torchvision import transforms, models
 from PIL import Image
-from torchvision import transforms
-import numpy as np
 import matplotlib.pyplot as plt
-#We use vgg19 for art style transfer
-vgg = models.vgg19(pretrained=True).features.eval()
 
-
-def load_image(image_path, max_size=400):
-    image = Image.open(image_path).convert('RGB')
+# Helper function to load and preprocess the images
+def load_image(image_path, size=512, crop=True):
+    image = Image.open(image_path)
+    if crop:
+        # Resize the image while keeping the aspect ratio
+        image = transforms.Resize(size)(image)
+    # Convert the image to a tensor and normalize it using VGG19's mean and std
     transform = transforms.Compose([
-        transforms.Resize(max_size),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    return transform(image).unsqueeze(0)  # Add batch dimension
+    image = transform(image).unsqueeze(0)  # Add batch dimension
+    return image
 
+# Function to unnormalize and display the image
+def imshow(tensor, title=None):
+    image = tensor.clone().detach().cpu()
+    image = image.squeeze(0)
+    image = transforms.ToPILImage()(image)
+    plt.imshow(image)
+    if title is not None:
+        plt.title(title)
+    plt.show()
+
+# Define AdaIN (Adaptive Instance Normalization) layer
+class AdaIN(nn.Module):
+    def __init__(self):
+        super(AdaIN, self).__init__()
+
+    def forward(self, content, style):
+        # Compute the mean and standard deviation of content and style
+        content_mean, content_std = content.mean([2, 3], keepdim=True), content.std([2, 3], keepdim=True)
+        style_mean, style_std = style.mean([2, 3], keepdim=True), style.std([2, 3], keepdim=True)
+        
+        # Perform AdaIN
+        normalized_content = (content - content_mean) / content_std
+        stylized_content = normalized_content * style_std + style_mean
+        return stylized_content
+
+# Load content and style images
 content_img = load_image("content_temple.jpeg")
 style_img = load_image("starryNight.jpg")
 
+# Pre-trained VGG19 model for feature extraction
+vgg = models.vgg19(pretrained=True).features.eval()
 
+# Move the images and model to the GPU if available
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+content_img = content_img.to(device)
+style_img = style_img.to(device)
+vgg = vgg.to(device)
 
+# AdaIN layer
+adain = AdaIN().to(device)
 
-def get_features(image, model):
-    layers = {
-        '0': 'conv1_1',
-        '5': 'conv2_1',
-        '10': 'conv3_1',
-        '19': 'conv4_1',
-        '21': 'conv4_2',
-        '28': 'conv5_1'
-    }
-    features = {}
-    x = image
-    for name, layer in model._modules.items():
-        x = layer(x)
-        if name in layers:
-            features[layers[name]] = x
-    return features
+# Optimization setup
+output_img = content_img.clone().requires_grad_(True)
+optimizer = optim.Adam([output_img], lr=0.1)
 
-content_features = get_features(content_img, vgg)
-style_features = get_features(style_img, vgg)
-
-def gram_matrix(imgfeature):
-    _,d,h,w = imgfeature.size()
-    imgfeature = imgfeature.view(d,h*w)
-    gram_mat = torch.mm(imgfeature,imgfeature.t())
+# Define the loss function
+def compute_loss(output, target, style, content):
+    # Content loss (MSE)
+    content_loss = nn.functional.mse_loss(output, content)
     
-    return gram_mat
+    # Style loss (using Gram matrices)
+    output_gram = gram_matrix(output)
+    style_gram = gram_matrix(style)
+    style_loss = nn.functional.mse_loss(output_gram, style_gram)
+    
+    # Total loss
+    total_loss = content_loss + style_loss
+    return total_loss
 
-def computerStyleLoss(styleLayer, targetLayer):
-    _,d,h,w = targetLayer.size()
-    style_gram=gram_matrix(styleLayer)
-    target_gram=gram_matrix(targetLayer)
-    return torch.mean((target_gram-style_gram)**2)/d*w*h
+def gram_matrix(tensor):
+    b, c, h, w = tensor.size()
+    tensor = tensor.view(b, c, h * w)
+    tensor_t = tensor.transpose(1, 2)
+    gram = torch.bmm(tensor, tensor_t)
+    return gram / (c * h * w)
 
-def content_loss(content, target):
-    return torch.mean((content - target) ** 2)
-
-target_img = content_img.clone().requires_grad_(True)  # Allow gradients for optimization
-optimizer = torch.optim.Adam([target_img], lr=0.003)
-# style_weight = 1000000
-# content_weight = 1
-content_weight = 100
-style_weight = 1e8
-
-import torch.nn as nn
-import metric
-
-# Define a function to load the Inception model for feature extraction
-class InceptionV3(nn.Module):
-    def __init__(self):
-        super(InceptionV3, self).__init__()
-        inception = models.inception_v3(pretrained=True, transform_input=False)
-        self.features = nn.Sequential(*list(inception.children())[:-1])  # Remove the last FC layer
-        self.features.eval()
-
-    def forward(self, x):
-        x = nn.functional.interpolate(x, size=(299, 299), mode='bilinear')
-        x = self.features(x)
-        return x.view(x.size(0), -1)
-
-# Load the InceptionV3 model
-inception_model = InceptionV3().eval()
-
-import lpips
-# Initialize the LPIPS model (default: use VGG as the backbone)
-lpips_model = lpips.LPIPS(net='vgg').eval()
-
-sifid_scores = []
-lpips_scores = []
-
-for epoch in range(2000):
-    print(f"Epoch {epoch}")
+# Style transfer loop
+num_epochs = 1000
+for epoch in range(num_epochs):
     optimizer.zero_grad()
-    target_features=get_features(target_img, vgg)
-    c_loss=content_loss(content_features['conv4_2'], target_features["conv4_2"])
-    s_loss=0
-    for layer in style_features:
-        s_loss+=computerStyleLoss(target_features[layer], style_features[layer])
 
-    total_loss = content_weight * c_loss + style_weight * s_loss
-    total_loss.backward(retain_graph=True)
+    # Extract features from content and style
+    content_features = vgg(content_img)
+    style_features = vgg(style_img)
+    
+    # Transfer style from style image to content image using AdaIN
+    output_img = adain(content_features, style_features)
+
+    # Compute loss
+    loss = compute_loss(output_img, content_img, style_img, content_img)
+    
+    # Backpropagation
+    loss.backward()
     optimizer.step()
 
-    # Calculate SIFID and LPIPS scores
-    sifid = metric.calculate_sifid(style_img, target_img, inception_model)
-    sifid_scores.append(sifid)
-    lpips = metric.calculate_lpips(style_img, target_img, lpips_model)
-    lpips_scores.append(lpips)
+    # Print progress
+    if (epoch + 1) % 100 == 0:
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Loss: {loss.item():.4f}")
 
-    print(f"Epoch {epoch}, Total Loss: {total_loss.item()}, SIFID: {sifid}")
+# Display the output image
+imshow(output_img, title='Stylized Image')
 
-def im_convert(tensor):
-    image = tensor.to("cpu").clone().detach().numpy()
-    image = image.squeeze(0)  # Remove the batch dimension
-    image = image.transpose(1, 2, 0)  # Rearrange to HWC
-    image = image * 0.225 + 0.450  # Un-normalize
-    image = np.clip(image, 0, 1)
-    return image
-
-print("Here")
-output_image = im_convert(target_img)
-plt.imshow(output_image)
-plt.axis('off')
-plt.show()
-
-
-
+# Save the output image
+output_image = output_img.squeeze(0).cpu().detach()
+output_image = transforms.ToPILImage()(output_image)
+output_image.save('stylized_output.png')
