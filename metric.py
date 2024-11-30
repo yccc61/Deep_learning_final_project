@@ -20,12 +20,11 @@ class InceptionV3(nn.Module):
 # Load the InceptionV3 model
 inception_model = InceptionV3().eval()
 
-def calculate_sifid(real_img, generated_img, model):    
+def calculate_sifid(real_img, generated_img, model):   
     real_img = nn.functional.interpolate(real_img, size=(299, 299), mode='bilinear', align_corners=False)
     generated_img = nn.functional.interpolate(generated_img, size=(299, 299), mode='bilinear', align_corners=False)
     print('real_img shape:', real_img.shape)
     print('generated_img shape:', generated_img.shape)
-
     # Extract features for real (style) and generated images
     real_features = model(real_img).detach().numpy()
     generated_features = model(generated_img).detach().numpy()
@@ -41,6 +40,7 @@ def calculate_sifid(real_img, generated_img, model):
         covmean = covmean.real
     sifid = diff.dot(diff) + np.trace(sigma_real + sigma_generated - 2 * covmean)
     
+    print(sifid)
     return sifid
 
 # Function to calculate LPIPS
